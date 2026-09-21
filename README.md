@@ -16,7 +16,9 @@ The workflow fails instead of publishing when the upstream source no longer acce
 The artifact contains `codex.exe`, `artifact-metadata.txt`, and `SHA256SUMS.txt`. Verify the checksum and version before replacing:
 
 ```text
-D:\nodejs\node_global\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe
+<npm root -g 的输出>\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe
 ```
+
+在 Windows 上先运行 `npm.cmd root -g`，把输出替换到上面的占位符中。输出已经包含 `node_modules`，不要重复追加。用 `where.exe codex` 确认当前 CLI 入口属于同一套 npm 安装，并确认目标文件确实存在。该路径适用于上述嵌套平台包布局；若目录不存在，先检查实际安装结构，不要直接创建目录或覆盖其他文件。替换前退出正在运行的 CLI 并备份原文件。
 
 Do not replace the similarly named executable under a VS Code extension directory. An npm reinstall or upgrade can overwrite this custom binary.

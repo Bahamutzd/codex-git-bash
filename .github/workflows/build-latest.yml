@@ -102,13 +102,17 @@ jobs:
         shell: pwsh
         run: cargo fmt --all -- --check
 
-      - name: Run shell-command tests
+      - name: Install cargo-nextest
         working-directory: upstream-codex/codex-rs
         shell: pwsh
         run: |
           cargo install cargo-nextest --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo nextest run --release --locked -p codex-shell-command --no-fail-fast
+
+      - name: Run shell-command tests
+        working-directory: upstream-codex/codex-rs
+        shell: pwsh
+        run: cargo nextest run --release --locked -p codex-shell-command --no-fail-fast
 
       - name: Build CLI
         working-directory: upstream-codex/codex-rs
