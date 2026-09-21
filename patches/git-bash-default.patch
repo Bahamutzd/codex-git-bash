@@ -1,0 +1,179 @@
+diff --git a/codex-rs/core/src/shell_tests.rs b/codex-rs/core/src/shell_tests.rs
+index 0963ef8..cf1a81a 100644
+--- a/codex-rs/core/src/shell_tests.rs
++++ b/codex-rs/core/src/shell_tests.rs
+@@ -164,15 +164,15 @@ async fn test_current_shell_detects_zsh() {
+ }
+ 
+ #[tokio::test]
+-async fn detects_powershell_as_default() {
++async fn detects_windows_default_shell() {
+     if !cfg!(windows) {
+         return;
+     }
+ 
+-    let powershell_shell = default_user_shell();
+-    let shell_path = powershell_shell.shell_path;
+-
+-    assert!(shell_path.ends_with("pwsh.exe") || shell_path.ends_with("powershell.exe"));
++    let expected = get_shell(ShellType::Bash)
++        .or_else(|| get_shell(ShellType::PowerShell))
++        .unwrap_or_else(ultimate_fallback_shell);
++    assert_eq!(default_user_shell(), expected);
+ }
+ 
+ #[test]
+diff --git a/codex-rs/shell-command/src/shell_detect.rs b/codex-rs/shell-command/src/shell_detect.rs
+index c74532c..c80e065 100644
+--- a/codex-rs/shell-command/src/shell_detect.rs
++++ b/codex-rs/shell-command/src/shell_detect.rs
+@@ -226,9 +226,16 @@ fn get_zsh_shell() -> Option<DetectedShell> {
+     })
+ }
+ 
++#[cfg(not(windows))]
+ const BASH_FALLBACK_PATHS: &[&str] = &["/bin/bash", "/usr/bin/bash"];
+ 
+ fn get_bash_shell() -> Option<DetectedShell> {
++    #[cfg(windows)]
++    let shell_path = find_git_bash_path(
++        which::which_all("git").into_iter().flatten(),
++        which::which_all("bash").into_iter().flatten(),
++    );
++    #[cfg(not(windows))]
+     let shell_path = get_shell_path(ShellType::Bash, "bash", BASH_FALLBACK_PATHS);
+ 
+     shell_path.map(|shell_path| DetectedShell {
+@@ -347,9 +354,50 @@ pub fn default_user_shell() -> DetectedShell {
+     default_user_shell_from_path(get_user_shell_path())
+ }
+ 
++#[cfg(windows)]
++fn find_git_bash_path(
++    git_paths: impl IntoIterator<Item = PathBuf>,
++    bash_paths: impl IntoIterator<Item = PathBuf>,
++) -> Option<PathBuf> {
++    for git_path in git_paths {
++        let Some(mut git_root) = git_path.parent().and_then(std::path::Path::parent) else {
++            continue;
++        };
++        if git_root.file_name().is_some_and(|name| {
++            name.eq_ignore_ascii_case("mingw64") || name.eq_ignore_ascii_case("mingw32")
++        }) && let Some(parent) = git_root.parent()
++        {
++            git_root = parent;
++        }
++        for relative in ["bin/bash.exe", "usr/bin/bash.exe"] {
++            if let Some(path) = file_exists(&git_root.join(relative)) {
++                return Some(path);
++            }
++        }
++    }
++
++    // 跳过 WSL 启动器和应用执行别名，继续查找后续 PATH 项。
++    bash_paths.into_iter().find_map(|path| {
++        let normalized = path
++            .to_string_lossy()
++            .replace('\\', "/")
++            .to_ascii_lowercase();
++        if normalized.ends_with("/system32/bash.exe")
++            || normalized.ends_with("/sysnative/bash.exe")
++            || normalized.split('/').any(|part| part == "windowsapps")
++        {
++            None
++        } else {
++            file_exists(&path)
++        }
++    })
++}
++
+ pub fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> DetectedShell {
+     if cfg!(windows) {
+-        get_shell(ShellType::PowerShell).unwrap_or_else(ultimate_fallback_shell)
++        get_shell(ShellType::Bash)
++            .or_else(|| get_shell(ShellType::PowerShell))
++            .unwrap_or_else(ultimate_fallback_shell)
+     } else {
+         let user_default_shell = user_shell_path
+             .and_then(|shell| detect_shell_type(&shell))
+@@ -374,6 +422,80 @@ mod tests {
+     use super::*;
+     use pretty_assertions::assert_eq;
+ 
++    #[test]
++    #[cfg(windows)]
++    fn git_bash_discovery_prefers_git_installation() -> anyhow::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let git_root = temp.path().join("Git With Spaces");
++        std::fs::create_dir_all(git_root.join("bin"))?;
++        let expected = git_root.join("bin/bash.exe");
++        std::fs::write(&expected, [])?;
++        let other_bash = temp.path().join("bash.exe");
++        std::fs::write(&other_bash, [])?;
++        for git_relative in ["cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe"] {
++            assert_eq!(
++                find_git_bash_path([git_root.join(git_relative)], [other_bash.clone()]),
++                Some(expected.clone())
++            );
++        }
++        Ok(())
++    }
++
++    #[test]
++    #[cfg(windows)]
++    fn git_bash_discovery_uses_usr_bin() -> anyhow::Result<()> {
++        let temp = tempfile::tempdir()?;
++        std::fs::create_dir_all(temp.path().join("usr/bin"))?;
++        let expected = temp.path().join("usr/bin/bash.exe");
++        std::fs::write(&expected, [])?;
++        assert_eq!(
++            find_git_bash_path([temp.path().join("cmd/git.exe")], []),
++            Some(expected)
++        );
++        Ok(())
++    }
++
++    #[test]
++    #[cfg(windows)]
++    fn git_bash_discovery_falls_back_without_git_and_skips_wsl() -> anyhow::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let mut candidates = Vec::new();
++        for directory in ["System32", "Sysnative", "WindowsApps", "portable"] {
++            let parent = temp.path().join(directory);
++            std::fs::create_dir_all(&parent)?;
++            let candidate = parent.join("bash.exe");
++            std::fs::write(&candidate, [])?;
++            candidates.push(candidate);
++        }
++        assert_eq!(
++            find_git_bash_path([], candidates.clone()),
++            candidates.last().cloned()
++        );
++        assert_eq!(find_git_bash_path([], candidates[..3].to_vec()), None);
++        assert_eq!(
++            find_git_bash_path([], [temp.path().join("missing.exe")]),
++            None
++        );
++        Ok(())
++    }
++
++    #[test]
++    #[cfg(windows)]
++    fn windows_default_prefers_bash_and_can_execute() -> anyhow::Result<()> {
++        let expected = get_shell(ShellType::Bash)
++            .or_else(|| get_shell(ShellType::PowerShell))
++            .unwrap_or_else(ultimate_fallback_shell);
++        assert_eq!(default_user_shell(), expected);
++        if expected.shell_type == ShellType::Bash {
++            let output = std::process::Command::new(&expected.shell_path)
++                .args(["-c", "printf GitBashWorks"])
++                .output()?;
++            assert!(output.status.success(), "{output:?}");
++            assert_eq!(String::from_utf8(output.stdout)?, "GitBashWorks");
++        }
++        Ok(())
++    }
++
+     #[test]
+     fn elevated_sandbox_filter_rejects_store_and_script_powershell_paths() {
+         for path in [

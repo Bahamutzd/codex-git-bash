@@ -1,0 +1,156 @@
+name: Build Latest Codex Git Bash
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Official rust-vX.Y.Z tag; empty means latest stable tag"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-git-bash-release
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      version: ${{ steps.resolve.outputs.version }}
+      build: ${{ steps.resolve.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        shell: bash
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$REQUESTED_REF" ]; then
+            ref="$REQUESTED_REF"
+          else
+            ref="$(bash scripts/resolve_latest_tag.sh)"
+          fi
+          test -n "$ref"
+          [[ "$ref" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${ref#rust-v}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          release="codex-git-bash-${version}-${GITHUB_SHA:0:12}"
+          releases="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].tag_name')"
+          if grep -Fxq "$release" <<< "$releases"; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download official source
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch "${{ needs.resolve.outputs.ref }}" `
+            https://github.com/openai/codex.git upstream-codex
+
+      - name: Apply patch
+        shell: pwsh
+        working-directory: upstream-codex
+        run: |
+          git apply --check ../patches/git-bash-default.patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git apply ../patches/git-bash-default.patch
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Prepare upstream version and toolchain
+        id: prepare
+        run: python scripts/prepare.py
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.prepare.outputs.toolchain }}
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+            upstream-codex\codex-rs\target
+          key: codex-win-x64-${{ needs.resolve.outputs.ref }}-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}
+          restore-keys: codex-win-x64-
+
+      - name: Check formatting
+        working-directory: upstream-codex/codex-rs
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      - name: Run shell-command tests
+        working-directory: upstream-codex/codex-rs
+        shell: pwsh
+        run: |
+          cargo install cargo-nextest --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo nextest run --release --locked -p codex-shell-command --no-fail-fast
+
+      - name: Build CLI
+        working-directory: upstream-codex/codex-rs
+        shell: pwsh
+        run: cargo build --release --locked -p codex-cli --bin codex
+
+      - name: Verify artifact
+        shell: pwsh
+        run: |
+          $exe = "upstream-codex\codex-rs\target\release\codex.exe"
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts\verify-shell.mjs $exe bash
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "${hash}  codex.exe" | Set-Content SHA256SUMS.txt
+          @(
+            "upstream_ref=${{ needs.resolve.outputs.ref }}"
+            "upstream_version=${{ needs.resolve.outputs.version }}"
+            "patch_commit=${{ github.sha }}"
+            "sha256=$hash"
+          ) | Set-Content artifact-metadata.txt
+          Copy-Item $exe codex.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codex-win32-x64-${{ needs.resolve.outputs.version }}-git-bash
+          path: |
+            codex.exe
+            SHA256SUMS.txt
+            artifact-metadata.txt
+          retention-days: 30
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "codex-git-bash-${{ needs.resolve.outputs.version }}-$('${{ github.sha }}'.Substring(0,12))"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag codex.exe SHA256SUMS.txt artifact-metadata.txt `
+              --title "Codex ${{ needs.resolve.outputs.version }} Git Bash" `
+              --notes "Built from official ${{ needs.resolve.outputs.ref }} with Git Bash default-shell patch."
+          }
