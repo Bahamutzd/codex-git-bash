@@ -118,10 +118,7 @@ jobs:
       - name: Build CLI
         working-directory: upstream-codex/codex-rs
         shell: pwsh
-        run: |
-          $log = "$env:GITHUB_WORKSPACE\build-cli.log"
-          cargo +${{ steps.prepare.outputs.toolchain }} build --release --locked -p codex-cli --bin codex --verbose 2>&1 | Tee-Object -FilePath $log
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        run: '& "$env:GITHUB_WORKSPACE/scripts/build-cli.ps1" -Toolchain "${{ steps.prepare.outputs.toolchain }}"'
 
       - name: Verify artifact
         shell: pwsh
@@ -150,6 +147,7 @@ jobs:
             SHA256SUMS.txt
             artifact-metadata.txt
             build-cli.log
+            build-diagnostics.log
           if-no-files-found: warn
           retention-days: 30
 
