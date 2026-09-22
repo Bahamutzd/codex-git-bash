@@ -84,7 +84,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: ${{ steps.prepare.outputs.toolchain }}
+          # Regenerated dependencies may require newer rustc than the upstream MSRV.
+          toolchain: 1.96.0
           targets: x86_64-pc-windows-msvc
           components: rustfmt
 
