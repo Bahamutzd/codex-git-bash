@@ -88,6 +88,11 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: rustfmt
 
+      - name: Synchronize Cargo.lock
+        working-directory: upstream-codex/codex-rs
+        shell: pwsh
+        run: cargo generate-lockfile
+
       - uses: actions/cache@v4
         with:
           path: |
