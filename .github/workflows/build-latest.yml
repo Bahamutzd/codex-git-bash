@@ -8,7 +8,8 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "0 3 * * *"
+    # GitHub cron uses UTC: 22:00 UTC = 06:00 Asia/Shanghai next day.
+    - cron: "0 22 * * *"
 
 permissions:
   contents: read
