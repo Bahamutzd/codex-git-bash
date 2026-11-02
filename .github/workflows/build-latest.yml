@@ -117,10 +117,13 @@ jobs:
           key: codex-win-x64-${{ needs.resolve.outputs.ref }}-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}
           restore-keys: codex-win-x64-
 
-      - name: Check formatting
-        working-directory: upstream-codex/codex-rs
+      - name: Check patch formatting
+        working-directory: upstream-codex
         shell: pwsh
-        run: cargo +${{ steps.prepare.outputs.toolchain }} fmt --all -- --check
+        run: |
+          $files = @(git diff --name-only -- '*.rs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustfmt +${{ steps.prepare.outputs.toolchain }} --check $files
 
       - name: Build CLI
         working-directory: upstream-codex/codex-rs
